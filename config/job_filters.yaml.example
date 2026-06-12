@@ -1,0 +1,31 @@
+# Deterministic pre-filter for job-search noise.
+# Matches are checked against sender address (substring match) and
+# subject+snippet text (case-insensitive substring match).
+# Add new senders/keywords here as you encounter them.
+
+ats_senders:
+  - greenhouse.io
+  - lever.co
+  - myworkday.com
+  - ashbyhq.com
+  - icims.com
+  - smartrecruiters.com
+  - workable.com
+
+ats_keywords:
+  - "thank you for applying"
+  - "we've received your application"
+  - "we have received your application"
+  - "moving forward with other candidates"
+  - "won't be moving forward"
+  - "will not be moving forward"
+  - "application status"
+
+linkedin_job_senders:
+  - jobs-noreply@linkedin.com
+  - jobs-listings@linkedin.com
+
+linkedin_job_keywords:
+  - "new jobs for you"
+  - "job alert"
+  - "jobs similar to"

@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+PLAN.md
+PRD.md
+TDD.md
+
+# Calendar Concierge project-specific
+credentials.json
+token.json
+state/*.json
+logs/*.log
+runs/*.json
+/secrets
+secrets/*
+/config/*.yaml

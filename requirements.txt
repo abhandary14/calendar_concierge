@@ -1,0 +1,14 @@
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+langchain
+langchain-core
+langchain-groq
+python-dotenv
+apscheduler
+pyyaml
+fastapi
+uvicorn
+jinja2
+pydantic
+tenacity

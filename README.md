@@ -1,0 +1,1 @@
+An autonomous agent that scrapes all emails recieved during the last 24 hours and summarizes them. Also scrapes data from the user's Google calendar. 

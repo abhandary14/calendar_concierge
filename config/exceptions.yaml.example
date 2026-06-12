@@ -1,0 +1,4 @@
+# Newsletter/marketing senders to keep (domain or full address match).
+# Anything NOT listed here will be flagged "unsubscribe?" in the dashboard.
+keep:
+  - substack.com
