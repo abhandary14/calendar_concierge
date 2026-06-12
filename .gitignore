@@ -230,3 +230,6 @@ runs/*.json
 /secrets
 secrets/*
 /config/*.yaml
+# DevContext - AI coding context
+.devctx/
+/graphify-out/
