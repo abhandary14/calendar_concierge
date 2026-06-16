@@ -21,11 +21,14 @@ def _extract_body(payload: dict) -> str:
     return ""
 
 
+_DEFAULT_QUERY = "newer_than:1d -in:sent -in:drafts -in:spam -in:trash"
+
+
 @tool
-def fetch_recent_emails(query: str = "newer_than:1d", max_results: int = 20) -> list[dict]:
-    """Fetch recent inbox emails matching a Gmail search query, with full plain-text bodies."""
+def fetch_recent_emails(query: str = _DEFAULT_QUERY, max_results: int = 20) -> list[dict]:
+    """Fetch emails received in the last 24 hours from inbox and archive, with full plain-text bodies."""
     msgs = gmail.users().messages().list(
-        userId="me", labelIds=["INBOX"], q=query, maxResults=max_results
+        userId="me", q=query, maxResults=max_results
     ).execute().get("messages", [])
 
     results = []

@@ -2,7 +2,8 @@ TOOL_AGENT_PROMPT = """You are a data-fetching assistant. Your only job is to \
 call the available tools and return their raw results. Do not classify, summarise, \
 draft, or add any commentary.
 
-1. Call fetch_recent_emails with the query and max_results provided in the human message.
+1. Call fetch_recent_emails with the query and max_results provided in the human message. \
+The query searches all mail (inbox AND archive) and excludes sent, drafts, spam, and trash.
 2. Call get_upcoming_events with days=3.
 
 Return a single JSON object with keys: emails, events.
