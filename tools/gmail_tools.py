@@ -1,5 +1,6 @@
 import base64
 import email as email_lib
+import json
 
 from langchain_core.tools import tool
 
@@ -25,8 +26,8 @@ _DEFAULT_QUERY = "newer_than:1d -in:sent -in:drafts -in:spam -in:trash"
 
 
 @tool
-def fetch_recent_emails(query: str = _DEFAULT_QUERY, max_results: int = 20) -> list[dict]:
-    """Fetch emails received in the last 24 hours from inbox and archive, with full plain-text bodies."""
+def fetch_recent_emails(query: str = _DEFAULT_QUERY, max_results: int = 20) -> str:
+    """Fetch emails received in the last 24 hours from inbox and archive, with full plain-text bodies. Returns JSON string."""
     msgs = gmail.users().messages().list(
         userId="me", q=query, maxResults=max_results
     ).execute().get("messages", [])
@@ -45,7 +46,7 @@ def fetch_recent_emails(query: str = _DEFAULT_QUERY, max_results: int = 20) -> l
             "body": _extract_body(raw["payload"])[:800],
             "list_unsubscribe": headers.get("List-Unsubscribe"),
         })
-    return results
+    return json.dumps(results)
 
 
 @tool

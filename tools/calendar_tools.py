@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 from langchain_core.tools import tool
@@ -8,8 +9,8 @@ _, calendar = get_services()
 
 
 @tool
-def get_upcoming_events(days: int = 3) -> list[dict]:
-    """Get calendar events for the next N days."""
+def get_upcoming_events(days: int = 3) -> str:
+    """Get calendar events for the next N days. Returns JSON string."""
     now = datetime.now(timezone.utc).isoformat()
     end = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
     events = calendar.events().list(
@@ -20,7 +21,7 @@ def get_upcoming_events(days: int = 3) -> list[dict]:
         orderBy="startTime",
     ).execute().get("items", [])
 
-    return [
+    return json.dumps([
         {
             "summary": e.get("summary", "(no title)"),
             "start": e["start"].get("dateTime", e["start"].get("date")),
@@ -29,4 +30,4 @@ def get_upcoming_events(days: int = 3) -> list[dict]:
             "description": e.get("description", ""),
         }
         for e in events
-    ]
+    ])

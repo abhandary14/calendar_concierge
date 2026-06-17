@@ -9,11 +9,12 @@ class SecurityAlert(BaseModel):
 
 
 class ActionableEmail(BaseModel):
+    email_id: str | None = None  # join key back to the raw email, for threaded replies
     from_: str = Field(alias="from")
     subject: str
     snippet: str
-    draft_saved: bool
     draft_text: str | None = None
+    draft_saved: bool = False  # set by Python after save_draft succeeds
 
 
 class NewsletterOrMarketingEmail(BaseModel):
@@ -53,7 +54,7 @@ class PipelineError(BaseModel):
 
 
 class BriefingSchema(BaseModel):
-    status: str  # "success" | "partial" | "failed"
+    status: str = "success"  # "success" | "partial" | "failed"; overridden by the pipeline
     errors: list[PipelineError] = []
     security_alerts: list[SecurityAlert] = []
     actionable_emails: list[ActionableEmail] = []

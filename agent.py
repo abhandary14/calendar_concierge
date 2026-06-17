@@ -1,32 +1,31 @@
 import json
 import logging
-import re
 from datetime import datetime, timedelta
 
 import yaml
-from langchain.agents import create_agent
 from langchain_core.prompts import ChatPromptTemplate
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from auth import AuthError
 from filters import split_emails
-from models import summary_model, tool_model
-from prompts import (
-    SUMMARY_AGENT_STEP1_PROMPT,
-    SUMMARY_AGENT_STEP2_PROMPT,
-    TOOL_AGENT_PROMPT,
+from models import summary_model
+from prompts import SUMMARY_PROMPT
+from schema import (
+    ApplicationUpdate,
+    BriefingSchema,
+    CalendarEvent,
+    JobRecommendation,
+    PipelineError,
 )
-from schema import BriefingSchema, CalendarEvent, PipelineError
 from state_store import get_last_success, get_processed_ids, mark_processed
 from tools.calendar_tools import get_upcoming_events
 from tools.gmail_tools import fetch_recent_emails, save_draft
 
 logger = logging.getLogger("concierge")
 
-fetch_tools = [fetch_recent_emails, get_upcoming_events]
-draft_tools = [save_draft]
-
 _DEFAULT_FETCH_QUERY = "newer_than:1d -in:sent -in:drafts -in:spam -in:trash"
+_BODY_CAP = 500   # chars of body sent to the LLM per email
+_BATCH_SIZE = 6   # emails per LLM call, to stay under the 12K tokens-per-minute limit
 
 
 def _build_fetch_query() -> str:
@@ -49,99 +48,185 @@ def _load_profile() -> dict:
         return yaml.safe_load(f)
 
 
-def _parse_json_output(text: str) -> dict:
-    """
-    Extract a JSON object from an LLM output string.
-    Tries clean parse first, then strips markdown fences, then regex-extracts.
-    Raises ValueError if no valid JSON can be found.
-    """
-    text = text.strip()
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    stripped = re.sub(r"^```(?:json)?\s*", "", text)
-    stripped = re.sub(r"\s*```$", "", stripped).strip()
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        pass
-
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
-
-    raise ValueError(f"Could not extract JSON from agent output: {text[:300]!r}")
+def _slim_email(e: dict) -> dict:
+    """Trim an email to the fields the LLM needs, capping the body to control tokens."""
+    return {
+        "id": e.get("id"),
+        "from": e.get("from"),
+        "subject": e.get("subject"),
+        "date": e.get("date"),
+        "body": (e.get("body") or e.get("snippet") or "")[:_BODY_CAP],
+        "list_unsubscribe": e.get("list_unsubscribe"),
+    }
 
 
+# ---------------------------------------------------------------------------
+# Stage 1 — fetch (no LLM)
+# ---------------------------------------------------------------------------
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
-def run_tool_agent() -> dict:
-    """8B model: fetch emails and calendar events. Returns raw data dict."""
+def fetch_data() -> dict:
+    """Call Gmail and Calendar APIs directly — no LLM needed for deterministic fetching."""
     query = _build_fetch_query()
-    human_msg = f"Fetch all data now. Use query='{query}' and max_results=20."
-
-    agent = create_agent(tool_model, fetch_tools, system_prompt=TOOL_AGENT_PROMPT)
-    result = agent.invoke({"messages": [("human", human_msg)]})
-    output = result["messages"][-1].content
-    return _parse_json_output(output)
+    emails = json.loads(fetch_recent_emails.invoke({"query": query, "max_results": 20}))
+    events = json.loads(get_upcoming_events.invoke({"days": 3}))
+    return {"emails": emails, "events": events}
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
-def run_summary_agent_step1(remaining_emails: list[dict], events: list[dict]) -> str:
-    """70B model step 1: classify emails, draft replies, call save_draft, flag calendar events."""
+# ---------------------------------------------------------------------------
+# Stage 2 — classify + draft (batched LLM calls)
+# ---------------------------------------------------------------------------
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=65))
+def _classify_batch(emails_batch: list[dict]) -> BriefingSchema:
+    """One 70B structured call over a small batch of emails."""
     exceptions = _load_exceptions()
     profile = _load_profile()
+    slim = [_slim_email(e) for e in emails_batch]
     context = (
         f"Exception list (keep these newsletter/marketing senders): {exceptions}\n\n"
-        f"User profile:\n{json.dumps(profile, indent=2)}\n\n"
-        f"Emails to classify:\n{json.dumps(remaining_emails, indent=2)}\n\n"
-        f"Calendar events:\n{json.dumps(events, indent=2)}"
+        f"User profile:\n{json.dumps(profile)}\n\n"
+        f"Emails to classify:\n{json.dumps(slim)}"
     )
-    agent = create_agent(
-        summary_model, draft_tools, system_prompt=SUMMARY_AGENT_STEP1_PROMPT
-    )
-    result = agent.invoke({"messages": [("human", context)]})
-    return result["messages"][-1].content
-
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
-def run_summary_agent_step2(
-    step1_output: str,
-    raw_data: dict,
-    filtered: dict,
-) -> BriefingSchema:
-    """70B model step 2: coerce step-1 reasoning into a validated BriefingSchema."""
     structured_model = summary_model.with_structured_output(BriefingSchema)
-    context = (
-        f"Reasoning and actions from step 1:\n{step1_output}\n\n"
-        f"Original raw emails (for reference):\n"
-        f"{json.dumps(raw_data.get('emails', []), indent=2)}\n\n"
-        f"Application updates (pre-filtered, include as-is):\n"
-        f"{json.dumps(filtered['application_updates'], indent=2)}\n\n"
-        f"Job recommendations (pre-filtered, include as-is):\n"
-        f"{json.dumps(filtered['job_recommendations'], indent=2)}\n\n"
-        f"Calendar events:\n{json.dumps(raw_data.get('events', []), indent=2)}"
-    )
     prompt = ChatPromptTemplate.from_messages([
-        ("system", SUMMARY_AGENT_STEP2_PROMPT),
+        ("system", SUMMARY_PROMPT),
         ("human", "{input}"),
     ])
     return (prompt | structured_model).invoke({"input": context})
 
 
+def classify_and_draft(remaining_emails: list[dict]) -> BriefingSchema:
+    """Classify all emails in batches and merge the per-batch briefings into one."""
+    merged = BriefingSchema()
+    total_batches = (len(remaining_emails) + _BATCH_SIZE - 1) // _BATCH_SIZE
+
+    for i in range(0, len(remaining_emails), _BATCH_SIZE):
+        batch = remaining_emails[i:i + _BATCH_SIZE]
+        n = i // _BATCH_SIZE + 1
+        logger.info("Classifying batch %d/%d (%d emails)", n, total_batches, len(batch))
+        b = _classify_batch(batch)
+        merged.security_alerts += b.security_alerts
+        merged.actionable_emails += b.actionable_emails
+        merged.newsletters += b.newsletters
+        merged.marketing += b.marketing
+        merged.notifications += b.notifications
+        merged.action_items += b.action_items
+
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 — save drafts (no LLM)
+# ---------------------------------------------------------------------------
+def _draft_has_body(draft_text: str | None, signature: str) -> bool:
+    """True only if the draft has real content beyond the signature/greeting."""
+    if not draft_text:
+        return False
+    body = draft_text
+    for sig_line in signature.splitlines():
+        body = body.replace(sig_line.strip(), "")
+    # Strip common throwaway greetings/closings so signature-only drafts read as empty
+    for filler in ("hi", "hello", "dear", "best regards", "regards", "thanks", "thank you"):
+        body = body.lower().replace(filler, "")
+    return len(body.strip()) >= 20
+
+
+def save_drafts(briefing: BriefingSchema, raw_emails: list[dict]) -> None:
+    """Save a Gmail draft for each actionable email, threaded via the original email id."""
+    raw_by_id = {e["id"]: e for e in raw_emails}
+    signature = _load_profile().get("signature", "")
+
+    for ae in briefing.actionable_emails:
+        if not _draft_has_body(ae.draft_text, signature):
+            logger.info("Skipping empty/signature-only draft for: %s", ae.subject)
+            ae.draft_saved = False
+            continue
+
+        raw = raw_by_id.get(ae.email_id)
+        if raw is None:
+            # Fallback join by subject if the model didn't echo the id cleanly
+            raw = next((e for e in raw_emails if e["subject"] == ae.subject), None)
+
+        to_addr = raw["from"] if raw else ae.from_
+        thread_id = raw.get("thread_id") if raw else None
+        subj = ae.subject if ae.subject.lower().startswith("re:") else f"Re: {ae.subject}"
+
+        try:
+            save_draft.invoke({
+                "to": to_addr,
+                "subject": subj,
+                "body": ae.draft_text,
+                "thread_id": thread_id,
+            })
+            ae.draft_saved = True
+            logger.info("Draft saved for: %s", ae.subject)
+        except Exception:
+            logger.exception("Failed to save draft for: %s", ae.subject)
+            ae.draft_saved = False
+
+
+# ---------------------------------------------------------------------------
+# Calendar flagging (deterministic, no LLM)
+# ---------------------------------------------------------------------------
+def _parse_dt(s: str) -> datetime:
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def flag_events(events: list[dict]) -> list[CalendarEvent]:
+    """Compute back_to_back (<15 min gap) and no_agenda (empty description) flags."""
+    ordered = sorted(events, key=lambda e: e.get("start", ""))
+    flagged: list[CalendarEvent] = []
+
+    for idx, e in enumerate(ordered):
+        flags: list[str] = []
+        if not (e.get("description") or "").strip():
+            flags.append("no_agenda")
+
+        if idx > 0:
+            prev = ordered[idx - 1]
+            # Only compare timed events (all-day events use a bare date)
+            if "T" in prev.get("end", "") and "T" in e.get("start", ""):
+                try:
+                    gap = _parse_dt(e["start"]) - _parse_dt(prev["end"])
+                    if timedelta(0) <= gap < timedelta(minutes=15):
+                        flags.append("back_to_back")
+                except ValueError:
+                    pass
+
+        flagged.append(CalendarEvent(
+            summary=e.get("summary", "(no title)"),
+            start=e["start"],
+            end=e["end"],
+            flags=flags,
+        ))
+
+    return flagged
+
+
+def calendar_action_items(flagged: list[CalendarEvent]) -> list[str]:
+    """Natural-language follow-ups derived from calendar flags."""
+    items: list[str] = []
+    for e in flagged:
+        if "back_to_back" in e.flags:
+            items.append(
+                f"'{e.summary}' starts within 15 minutes of the previous event — "
+                "consider adding a buffer."
+            )
+        if "no_agenda" in e.flags:
+            items.append(f"No agenda set for '{e.summary}' — add one before the meeting.")
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
 def run_pipeline() -> BriefingSchema:
-    """Full pipeline: fetch → pre-filter → classify/draft → structure → persist state."""
+    """Full pipeline: fetch → pre-filter → classify/draft → save drafts → persist state."""
     errors: list[PipelineError] = []
 
-    # Stage 1 — fetch
+    # Stage 1 — fetch directly (no LLM)
     logger.info("Stage 1: fetching emails and calendar events")
     try:
-        raw_data = run_tool_agent()
+        raw_data = fetch_data()
         logger.info(
             "Fetched %d emails, %d events",
             len(raw_data.get("emails", [])),
@@ -154,7 +239,7 @@ def run_pipeline() -> BriefingSchema:
             errors=[PipelineError(stage="auth", message=str(e))],
         )
     except Exception as e:
-        logger.exception("Tool agent failed after retries")
+        logger.exception("Fetch failed after retries")
         return BriefingSchema(
             status="failed",
             errors=[PipelineError(stage="fetch", message=str(e))],
@@ -179,45 +264,46 @@ def run_pipeline() -> BriefingSchema:
         }
         errors.append(PipelineError(stage="prefilter", message=str(e)))
 
-    # Stage 2 — classify and draft
+    # Stage 2 — classify, draft, summarise (batched LLM calls)
     logger.info("Stage 2: classifying emails and drafting replies")
     try:
-        step1_output = run_summary_agent_step1(
-            filtered["remaining"], raw_data.get("events", [])
-        )
-        logger.info("Step 1 complete")
+        briefing = classify_and_draft(filtered["remaining"])
+        logger.info("Classification complete")
     except Exception as e:
-        logger.exception("Summary agent step 1 failed after retries")
+        logger.exception("Classify/draft failed after retries")
         return BriefingSchema(
             status="partial",
             errors=errors + [PipelineError(stage="classify_draft", message=str(e))],
-            application_updates=filtered["application_updates"],
-            job_recommendations=filtered["job_recommendations"],
-            calendar_events=[
-                CalendarEvent(
-                    summary=ev.get("summary", "(no title)"),
-                    start=ev["start"],
-                    end=ev["end"],
-                )
-                for ev in raw_data.get("events", [])
+            application_updates=[
+                ApplicationUpdate(**u) for u in filtered["application_updates"]
             ],
+            job_recommendations=[
+                JobRecommendation(**r) for r in filtered["job_recommendations"]
+            ],
+            calendar_events=flag_events(raw_data.get("events", [])),
         )
 
-    # Stage 3 — structured output
-    logger.info("Stage 3: structuring briefing output")
+    # Stage 3 — save drafts deterministically (no LLM)
+    logger.info("Stage 3: saving drafts")
     try:
-        briefing = run_summary_agent_step2(step1_output, raw_data, filtered)
-        briefing.status = "success" if not errors else "partial"
-        briefing.errors = errors
-        logger.info("Pipeline complete — status: %s", briefing.status)
+        save_drafts(briefing, raw_data.get("emails", []))
     except Exception as e:
-        logger.exception("Summary agent step 2 failed after retries")
-        return BriefingSchema(
-            status="partial",
-            errors=errors + [PipelineError(stage="structure_output", message=str(e))],
-            application_updates=filtered["application_updates"],
-            job_recommendations=filtered["job_recommendations"],
-        )
+        logger.exception("Draft saving failed")
+        errors.append(PipelineError(stage="save_drafts", message=str(e)))
+
+    # Calendar flagging + merge pre-filtered lists (deterministic)
+    briefing.calendar_events = flag_events(raw_data.get("events", []))
+    briefing.action_items += calendar_action_items(briefing.calendar_events)
+    briefing.application_updates = [
+        ApplicationUpdate(**u) for u in filtered["application_updates"]
+    ]
+    briefing.job_recommendations = [
+        JobRecommendation(**r) for r in filtered["job_recommendations"]
+    ]
+
+    briefing.status = "success" if not errors else "partial"
+    briefing.errors = errors
+    logger.info("Pipeline complete — status: %s", briefing.status)
 
     # Mark all remaining (non-pre-filtered) emails as processed
     mark_processed([e["id"] for e in filtered["remaining"]])

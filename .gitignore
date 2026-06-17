@@ -234,3 +234,4 @@ secrets/*
 # DevContext - AI coding context
 .devctx/
 /graphify-out/
+/scripts
