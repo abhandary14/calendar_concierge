@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block content %}
+
+{# Run selector #}
+<div class="run-selector">
+  <select onchange="window.location = this.value === 'latest' ? '/' : '/run/' + this.value">
+    {% for r in runs %}
+    <option value="{{ r.slug }}"
+      {% if r.slug == briefing.get('generated_at', '')[:16].replace('T','_').replace(':','-') or loop.first %}selected{% endif %}>
+      {{ r.generated_at | default(r.slug) }} — {{ r.status }}
+    </option>
+    {% endfor %}
+  </select>
+</div>
+
+{# Status banner (only shown when not success) #}
+{% if briefing.get('status') and briefing.status != 'success' %}
+<div class="banner banner-{{ briefing.status }}">
+  <strong>Status: {{ briefing.status }}</strong>
+  {% if briefing.errors %}
+  <ul>
+    {% for err in briefing.errors %}
+    <li>{{ err.stage }}: {{ err.message }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% endif %}
+
+{# Action items #}
+{% if briefing.get('action_items') %}
+<h2>Action items</h2>
+<ul class="action-list">
+  {% for item in briefing.action_items %}
+  <li>{{ item }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{# Security alerts #}
+{% if briefing.get('security_alerts') %}
+<h2>Security alerts</h2>
+{% for e in briefing.security_alerts %}
+<div class="alert-card">
+  <strong>{{ e.get('from') | default('Unknown') }}</strong>
+  <span class="meta"> — {{ e.get('subject') }}</span>
+  {% if e.get('summary') %}
+  <div class="summary">{{ e.summary }}</div>
+  {% endif %}
+  <div class="meta">{{ e.get('date') }}</div>
+</div>
+{% endfor %}
+{% endif %}
+
+{# Actionable emails #}
+<h2>Actionable emails</h2>
+{% if briefing.get('actionable_emails') %}
+{% for e in briefing.actionable_emails %}
+<div class="card">
+  <strong>{{ e.get('from') | default('Unknown') }}</strong> — {{ e.get('subject') }}
+  {% if e.get('draft_saved') %}
+  <span class="badge badge-saved">draft saved</span>
+  {% else %}
+  <span class="badge badge-unsaved">no draft</span>
+  {% endif %}
+  <div class="meta">{{ e.get('snippet') }}</div>
+  {% if e.get('draft_text') %}
+  <details>
+    <summary>View draft</summary>
+    <pre>{{ e.draft_text }}</pre>
+  </details>
+  {% endif %}
+</div>
+{% endfor %}
+{% else %}
+<p class="empty">No actionable emails.</p>
+{% endif %}
+
+{# Calendar events #}
+{% if briefing.get('calendar_events') %}
+<h2>Calendar — next 3 days</h2>
+{% for e in briefing.calendar_events %}
+<div class="card">
+  <strong>{{ e.get('summary') }}</strong>
+  {% for flag in e.get('flags', []) %}
+  <span class="badge badge-flag">{{ flag }}</span>
+  {% endfor %}
+  <div class="meta">{{ e.get('start') }} → {{ e.get('end') }}</div>
+</div>
+{% endfor %}
+{% endif %}
+
+{# Application updates #}
+{% if briefing.get('application_updates') %}
+<h2>Application updates</h2>
+<table>
+  <tr><th>From</th><th>Subject</th><th>Date</th></tr>
+  {% for e in briefing.application_updates %}
+  <tr>
+    <td>{{ e.get('from') }}</td>
+    <td>{{ e.get('subject') }}</td>
+    <td>{{ e.get('date') }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{# Job recommendations #}
+{% if briefing.get('job_recommendations') %}
+<h2>Job recommendations</h2>
+<table>
+  <tr><th>From</th><th>Subject</th><th>Date</th></tr>
+  {% for e in briefing.job_recommendations %}
+  <tr>
+    <td>{{ e.get('from') }}</td>
+    <td>{{ e.get('subject') }}</td>
+    <td>{{ e.get('date') }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{# Newsletters #}
+{% if briefing.get('newsletters') %}
+<h2>Newsletters</h2>
+{% for e in briefing.newsletters %}
+<div class="card">
+  <strong>{{ e.get('from') }}</strong> — {{ e.get('subject') }}
+  {% if not e.get('in_exception_list') and e.get('unsubscribe_link') %}
+  <div class="meta">
+    <a href="{{ e.unsubscribe_link }}" target="_blank" rel="noopener">unsubscribe</a>
+  </div>
+  {% endif %}
+</div>
+{% endfor %}
+{% endif %}
+
+{# Marketing #}
+{% if briefing.get('marketing') %}
+<h2>Marketing</h2>
+{% for e in briefing.marketing %}
+<div class="card">
+  <strong>{{ e.get('from') }}</strong> — {{ e.get('subject') }}
+  {% if not e.get('in_exception_list') and e.get('unsubscribe_link') %}
+  <div class="meta">
+    <a href="{{ e.unsubscribe_link }}" target="_blank" rel="noopener">unsubscribe</a>
+  </div>
+  {% endif %}
+</div>
+{% endfor %}
+{% endif %}
+
+{# Notifications #}
+{% if briefing.get('notifications') %}
+<h2>Notifications</h2>
+{% for e in briefing.notifications %}
+<div class="card">
+  <strong>{{ e.get('from') }}</strong> — {{ e.get('subject') }}
+</div>
+{% endfor %}
+{% endif %}
+
+{% if not briefing %}
+<p class="empty">No briefings found. Run <code>python main.py</code> to generate one.</p>
+{% endif %}
+
+{% endblock %}

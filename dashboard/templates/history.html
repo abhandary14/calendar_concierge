@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h2>Run history</h2>
+
+{% if runs %}
+<table>
+  <tr>
+    <th>Generated at</th>
+    <th>Status</th>
+    <th></th>
+  </tr>
+  {% for r in runs %}
+  <tr>
+    <td>{{ r.generated_at | default(r.slug) }}</td>
+    <td>
+      <span class="badge
+        {% if r.status == 'success' %}badge-saved
+        {% elif r.status == 'partial' %}badge-flag
+        {% else %}badge-unsaved{% endif %}">
+        {{ r.status }}
+      </span>
+      {% if r.errors %}
+      <span class="meta"> ({{ r.errors | length }} error{{ 's' if r.errors | length != 1 }})</span>
+      {% endif %}
+    </td>
+    <td><a href="/run/{{ r.slug }}">View</a></td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="empty">No runs yet. Run <code>python main.py</code> to generate a briefing.</p>
+{% endif %}
+
+{% endblock %}
