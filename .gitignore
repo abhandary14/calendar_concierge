@@ -235,3 +235,4 @@ secrets/*
 .devctx/
 /graphify-out/
 /scripts
+DECISIONS.md
